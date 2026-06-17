@@ -15,7 +15,8 @@ TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TOKEN:
     raise ValueError("TELEGRAM_TOKEN no está configurado en las variables de entorno")
 
-WORKSPACE = os.getenv("WORKSPACE", "")
+WORKSPACE = os.getenv("WORKSPACE", "").strip()
+WORKSPACES_RAW = os.getenv("WORKSPACES", "").strip()
 
 allowed_ids_raw = os.getenv("ALLOWED_CHAT_IDS", "").strip()
 ALLOWED_CHAT_IDS = {
@@ -48,6 +49,7 @@ _session_state = {
     "explain": False,
     "progress_enabled": True,
     "progress_interval_sec": 10,
+    "workspace": None,
 }
 
 _ansi_re = re.compile(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
@@ -71,14 +73,106 @@ def _is_allowed(chat_id: int) -> bool:
     return chat_id in ALLOWED_CHAT_IDS
 
 
-def _run_shell(command: str) -> str:
+def _parse_workspaces(raw: str, legacy_workspace: str) -> dict[str, str]:
+    workspaces: dict[str, str] = {}
+    if raw:
+        separator = ";" if ";" in raw else ","
+        entries = [entry.strip() for entry in raw.split(separator)]
+        for entry in entries:
+            if not entry:
+                continue
+            if "=" in entry:
+                name, path = entry.split("=", 1)
+                name = name.strip()
+                path = path.strip()
+            else:
+                path = entry
+                name = os.path.basename(os.path.normpath(path)) or path
+            if name and path:
+                workspaces[name] = path
+
+    if not workspaces and legacy_workspace:
+        workspaces["default"] = legacy_workspace
+
+    return workspaces
+
+
+WORKSPACES = _parse_workspaces(WORKSPACES_RAW, WORKSPACE)
+if len(WORKSPACES) == 1:
+    _session_state["workspace"] = next(iter(WORKSPACES))
+
+
+def _workspace_path(name: str | None = None) -> str | None:
+    workspace_name = name or _session_state["workspace"]
+    if not workspace_name:
+        return None
+    path = WORKSPACES.get(workspace_name)
+    if not path:
+        return None
+    return path or None
+
+
+def _current_workspace_label() -> str:
+    workspace_name = _session_state["workspace"]
+    if not workspace_name:
+        return "sin proyecto seleccionado"
+    path = _workspace_path(workspace_name) or os.getcwd()
+    return f"{workspace_name} ({path})"
+
+
+def _workspace_list_text() -> str:
+    if not WORKSPACES:
+        return (
+            "No hay proyectos configurados.\n"
+            "Configura WORKSPACES en .env o usa WORKSPACE para un solo proyecto."
+        )
+
+    lines = ["Proyectos disponibles:"]
+    selected = _session_state["workspace"]
+    for name, path in WORKSPACES.items():
+        marker = "*" if name == selected else "-"
+        lines.append(f"{marker} {name}: {path}")
+    lines.append("\nUsa /project <nombre> para elegir uno.")
+    return "\n".join(lines)
+
+
+def _select_workspace(name: str) -> str:
+    requested = name.strip()
+    if not requested:
+        return _workspace_list_text()
+
+    matches = {workspace_name.lower(): workspace_name for workspace_name in WORKSPACES}
+    workspace_name = matches.get(requested.lower())
+    if not workspace_name:
+        return f"Proyecto no encontrado: {requested}\n\n{_workspace_list_text()}"
+
+    path = _workspace_path(workspace_name)
+    if path and not os.path.isdir(path):
+        return f"La ruta del proyecto no existe o no es un directorio:\n{path}"
+
+    _session_state["workspace"] = workspace_name
+    _session_state["active"] = True
+    _session_state["has_session"] = False
+    _session_state["session_id"] = None
+    return f"Proyecto activo: {_current_workspace_label()}\n\nSesión de Codex reiniciada."
+
+
+def _ensure_workspace_selected() -> str | None:
+    if not WORKSPACES:
+        return None
+    if _session_state["workspace"]:
+        return None
+    return "Elige un proyecto antes de continuar.\n\n" + _workspace_list_text()
+
+
+def _run_shell(command: str, workspace_path: str | None) -> str:
     try:
         result = subprocess.run(
             ["/bin/bash", "-lc", command],
             capture_output=True,
             text=True,
             timeout=30,
-            cwd=WORKSPACE,
+            cwd=workspace_path,
         )
         output = (result.stdout or "") + (result.stderr or "")
         if not output.strip():
@@ -99,6 +193,7 @@ def _run_codex_exec(
     chat_id: int,
     progress_enabled: bool,
     progress_interval_sec: int,
+    workspace_path: str | None,
 ) -> tuple[str, str | None]:
     if session_id:
         cmd = ["codex", "exec", "--json", "resume", session_id, prompt]
@@ -168,8 +263,9 @@ def _run_codex_exec(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             text=True,
-            cwd=WORKSPACE,
+            cwd=workspace_path,
             env={**os.environ, "TERM": "dumb"},
         )
 
@@ -264,28 +360,35 @@ def _truncate(text: str, limit: int = 4000) -> str:
     return text[:3900] + "\n\n... (truncado)"
 
 def _start_text(chat_id: int) -> str:
-    return (
+    text = (
         "✓ Inicio\n\n"
         f"Tu chat_id es: {chat_id}\n"
         "Agrega este chat_id en ALLOWED_CHAT_IDS.\n"
         "Luego reinicia el servicio para que tome los valores.\n\n"
         "Cuando estés habilitado, ejecuta /open para iniciar sesión.\n"
     )
+    if WORKSPACES and _is_allowed(chat_id):
+        text += "\n" + _workspace_list_text()
+    return text
 
 def _help_text() -> str:
     return (
         "✓ Sesión abierta\n\n"
+        f"Proyecto activo: {_current_workspace_label()}\n\n"
         "Comandos disponibles:\n"
         "- /start o /open: abre sesión y muestra esta ayuda.\n"
         "- /help: muestra esta ayuda.\n"
+        "- /projects: lista proyectos configurados.\n"
+        "- /project <nombre>: cambia el proyecto activo.\n"
         "- /stop, /close, /reset, /new: cierra sesión.\n"
         "- /status: estado de la sesión.\n"
         "- /timeout <segundos|off>: configura timeout.\n"
         "- /explain <on|off>: agrega resumen de razonamiento (alto nivel).\n"
         "- /progress <on|off|segundos>: mensajes de progreso.\n"
-        "- !<comando>: ejecuta un comando en el shell (usa WORKSPACE).\n\n"
+        "- !<comando>: ejecuta un comando en el shell del proyecto activo.\n\n"
         "Importante:\n"
         "- Si ALLOWED_CHAT_IDS está vacío, se permiten todos los chats.\n"
+        "- Cambiar de proyecto reinicia la sesión de Codex.\n"
         "- No compartas tu token ni tu .env.\n"
     )
 
@@ -316,7 +419,8 @@ def run_command(message):
     with _session_lock:
         if text in {"/open", "/help"}:
             _session_state["active"] = True
-            output = _help_text()
+            workspace_prompt = _ensure_workspace_selected()
+            output = workspace_prompt or _help_text()
         elif text in {"/stop", "/close", "/reset", "/new"}:
             _session_state["active"] = False
             _session_state["has_session"] = False
@@ -329,6 +433,15 @@ def run_command(message):
                 output = "• Sesión activa (sin contexto previo)"
             else:
                 output = "• Sesión inactiva"
+            output += f"\nProyecto activo: {_current_workspace_label()}"
+        elif text in {"/projects", "/workspaces"}:
+            output = _workspace_list_text()
+        elif text.startswith("/project") or text.startswith("/workspace"):
+            parts = text.split(maxsplit=1)
+            if len(parts) == 1:
+                output = _workspace_list_text()
+            else:
+                output = _select_workspace(parts[1])
         elif text.startswith("/timeout"):
             parts = text.split()
             if len(parts) == 1:
@@ -387,27 +500,36 @@ def run_command(message):
                     except ValueError:
                         output = "⚠️ Uso: /progress <on|off|segundos>"
         elif text.startswith("!"):
-            command = text[1:].strip()
-            output = _run_shell(command)
+            workspace_prompt = _ensure_workspace_selected()
+            if workspace_prompt:
+                output = workspace_prompt
+            else:
+                command = text[1:].strip()
+                output = _run_shell(command, _workspace_path())
         else:
-            session_id = _session_state["session_id"] if _session_state["active"] else None
-            prompt = text
-            if _session_state["explain"]:
-                prompt = (
-                    f"{prompt}\n\n"
-                    "Incluye un resumen breve de razonamiento en 3 bullets (alto nivel, sin pasos detallados)."
+            workspace_prompt = _ensure_workspace_selected()
+            if workspace_prompt:
+                output = workspace_prompt
+            else:
+                session_id = _session_state["session_id"] if _session_state["active"] else None
+                prompt = text
+                if _session_state["explain"]:
+                    prompt = (
+                        f"{prompt}\n\n"
+                        "Incluye un resumen breve de razonamiento en 3 bullets (alto nivel, sin pasos detallados)."
+                    )
+                output, session_id = _run_codex_exec(
+                    prompt,
+                    session_id=session_id,
+                    timeout_sec=_session_state["timeout_sec"],
+                    chat_id=message.chat.id,
+                    progress_enabled=_session_state["progress_enabled"],
+                    progress_interval_sec=_session_state["progress_interval_sec"],
+                    workspace_path=_workspace_path(),
                 )
-            output, session_id = _run_codex_exec(
-                prompt,
-                session_id=session_id,
-                timeout_sec=_session_state["timeout_sec"],
-                chat_id=message.chat.id,
-                progress_enabled=_session_state["progress_enabled"],
-                progress_interval_sec=_session_state["progress_interval_sec"],
-            )
-            _session_state["active"] = True
-            _session_state["has_session"] = session_id is not None
-            _session_state["session_id"] = session_id
+                _session_state["active"] = True
+                _session_state["has_session"] = session_id is not None
+                _session_state["session_id"] = session_id
 
     bot.reply_to(message, _truncate(output))
 

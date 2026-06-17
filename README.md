@@ -30,14 +30,15 @@ Crea un archivo `.env` (o exporta variables en tu entorno). Ejemplo en `.env.exa
 Variables soportadas:
 - `TELEGRAM_TOKEN` (obligatoria): token del bot de Telegram.
 - `ALLOWED_CHAT_IDS` (opcional): lista separada por comas de IDs de chat autorizados. Si se deja vacío, se permiten todos.
-- `WORKSPACE` (opcional): ruta donde se ejecutan comandos y `codex exec`.
+- `WORKSPACES` (opcional): lista de proyectos disponibles. Formato recomendado: `api=/ruta/api;app=/ruta/app`. Si omites el nombre, se usa el nombre de la carpeta.
+- `WORKSPACE` (opcional): compatibilidad anterior para un solo proyecto. Se ignora si `WORKSPACES` está configurado.
 - `CODEX_TIMEOUT` (opcional): timeout en segundos para `codex exec`. Usa `off`, `0` o `none` para desactivar.
 
 Flujo recomendado de autorización:
 1. Ejecuta `/start` para ver tu `chat_id` (este comando siempre responde).
 2. Agrega ese `chat_id` a `ALLOWED_CHAT_IDS`.
 3. Reinicia el servicio para que tome los cambios.
-4. Ejecuta `/open` para iniciar sesión y ver la ayuda completa.
+4. Ejecuta `/open` para iniciar sesión y elegir el proyecto de trabajo.
 
 ## Ejecución
 ```bash
@@ -48,12 +49,14 @@ python local_bot.py
 - `/start`: muestra tu `chat_id` e instrucciones para habilitar acceso (no requiere autorización).
 - `/open`: inicia sesión y muestra ayuda (requiere estar en `ALLOWED_CHAT_IDS`).
 - `/help`: muestra la ayuda (requiere estar en `ALLOWED_CHAT_IDS`).
+- `/projects`: lista los proyectos configurados.
+- `/project <nombre>`: cambia el proyecto activo y reinicia el contexto de Codex. También funciona `/workspace <nombre>`.
 - `/stop`, `/close`, `/reset`, `/new`: cierra sesión.
 - `/status`: estado de la sesión.
 - `/timeout <segundos|off>`: configura timeout.
 - `/explain <on|off>`: agrega resumen de razonamiento (alto nivel) a las respuestas de Codex.
 - `/progress <on|off|segundos>`: habilita/ajusta mensajes de progreso.
-- `!<comando>`: ejecuta un comando en el shell (usa `WORKSPACE` como directorio).
+- `!<comando>`: ejecuta un comando en el shell usando el proyecto activo como directorio.
 
 ## Seguridad
 - **Restringe el acceso** usando `ALLOWED_CHAT_IDS` para evitar que terceros ejecuten comandos.
@@ -63,4 +66,6 @@ python local_bot.py
 
 ## Notas
 - Si `TELEGRAM_TOKEN` no está configurado, el bot falla al iniciar.
-- `WORKSPACE` vacío usa el directorio actual.
+- Si `WORKSPACES` contiene más de un proyecto, `/start` y `/open` muestran la lista y debes elegir con `/project <nombre>`.
+- Si solo configuras `WORKSPACE`, el bot selecciona ese proyecto automáticamente.
+- Si no configuras ningún workspace, el bot usa el directorio actual.
